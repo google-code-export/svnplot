@@ -25,23 +25,24 @@ Graph types to be supported
 11. directory size pie chart (latest status) -- Done
 12. Directory file count pie char(latest status) -- Done
 13. Loc and Churn graph (loc vs date, churn vs date)- Churn is number of lines touched
-	(i.e. lines added + lines deleted + lines modified) -- Done
+    (i.e. lines added + lines deleted + lines modified) -- Done
 14. Repository Activity Index (using exponential decay) -- Done
 15. Repository heatmap (treemap)
-16. Tag cloud of words in commit log message.
+16. Tag cloud of words in commit log message. -- Done
 
 To use copy the file in Python 'site-packages' directory Setup is not available
 yet.
 '''
+
 from optparse import OptionParser
+import sqlite3
 import os.path
 import sys
 import string
 import StringIO
 import math
 import shutil
-
-import sqlite3
+import json
 
 from svnstats import *
 from svnplotbase import *
@@ -63,31 +64,32 @@ HTMLIndexTemplate ='''<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional/
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-    <!--[if IE]><script type="text/javascript" src="excanvas.compiled.js"></script><![endif]-->	
+    <!--[if IE]><script type="text/javascript" src="excanvas.min.js"></script><![endif]--> 
     <title>Subversion Stats Plot for $RepoName</title>
     <style type="text/css">
-	th {background-color: #F5F5F5; text-align:center}
-	/*td {background-color: #FFFFF0}*/
-	h3 {background-color: transparent;margin:2}
-	h4 {background-color: transparent;margin:1}
-	.graph {
+    th {background-color: #F5F5F5; text-align:center}
+    /*td {background-color: #FFFFF0}*/
+    h3 {background-color: lightgrey;margin:2px;text-align:center;}
+    h4 {font-weight:bold;margin:1px;text-align:center;}
+    table.charts { width:100%; }
+    .graph {
         display: block;
         margin-left:auto;margin-right:auto;
         height:$thumbht;width:$thumbwid;
     }
     #GraphPopBox {
         display: none;
-		position: fixed;
-		top: 15%;
-		left: 15%;
-		right: 15%;
-		bottom: 15%;
-		margin:0px;
-		padding:0px;
+        position: fixed;
+        top: 15%;
+        left: 15%;
+        right: 15%;
+        bottom: 15%;
+        margin:0px;
+        padding:0px;
         background-color:#778899;
-		z-index:1002;		
-		overflow: none;
-		#overflow: auto;		
+        z-index:1002;       
+        overflow: none;
+        #overflow: auto;        
     }
     #Graph_big {
         position:absolute;
@@ -98,124 +100,186 @@ HTMLIndexTemplate ='''<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional/
         border : 2px solid black;
         padding: 10px;
         background-color: white;
-		#border: 16px solid black;		
-		}
-	#closebtn {
+        #border: 16px solid black;      
+        }
+    #closebtn {
         display:block;
         color:white;
         float:right;
         z-index:1005;
         margin:5px;
         padding:5px;
-	}	
-	</style>
-	<link type="text/css" rel="stylesheet" href="jquery.jqplot.min.css"/>		
-	<script type="text/javascript" src="jquery.min.js"></script>
-	<script type="text/javascript" src="jquery.jqplot.js"></script>	
-	<script type="text/javascript" src="jqplot.dateAxisRenderer.min.js"></script>	
-	<script type="text/javascript" src="jqplot.categoryAxisRenderer.min.js"></script>
-	<script type="text/javascript" src="jqplot.barRenderer.min.js"></script>
-	<script type="text/javascript" src="jqplot.pieRenderer.min.js"></script>
+        background-color: transparent;
+    }
+    
+    /* graph specific CSS
+     grid lines for two y axis looks really bad for LoCChurnGraph. Hence hide it */
+    .LocChurnGraph .y1.axis .tick line { display:none; }
+    .LocChurnGraph .y2.axis .tick line { display:none; }
+
+    /* tag cloud CSS        */
+    div#LogMsgCloud, div#AuthorCloud { height:360px; }
+    
+    /* below svg CSS element is important for firefox. Otherwise, word cloud not displayed
+     properly */
+    svg {
+     height: 100%;
+     width: 100%;
+    }
+    </style>
+    <link type="text/css" rel="stylesheet" href="jquery.jqplot.min.css"/>       
+    <script type="text/javascript" src="jquery.min.js"></script>
+    <script type="text/javascript" src="jquery.jqplot.js"></script> 
+    <script type="text/javascript" src="jqplot.dateAxisRenderer.min.js"></script>   
+    <script type="text/javascript" src="jqplot.categoryAxisRenderer.min.js"></script>
+    <script type="text/javascript" src="jqplot.barRenderer.min.js"></script>
+    <script type="text/javascript" src="jqplot.pieRenderer.min.js"></script>
+    <script type="text/javascript" src="jqplot.ohlcRenderer.min.js"></script>
+    <script type="text/javascript" src="jqplot.canvasTextRenderer.min.js"></script>
+    <script type="text/javascript" src="jqplot.canvasAxisTickRenderer.min.js"></script>
+    <script type="text/javascript" src="jqplot.canvasAxisLabelRenderer.min.js"></script>
+    <script type="text/javascript" src="jqplot.highlighter.min.js"></script>
     <script type="text/javascript" src="d3.v3.js"></script>
     <script type="text/javascript" src="d3.layout.cloud.js"></script>
     $LocTable
-	$LoCChurnTable	
-	$ContriLoCTable
-	$AvgLoCTable
-	$FileCountTable
-	$FileTypeCountTable
-	$DirSizePie
-	$DirSizeLine
-	$DirFileCountPie
-	$CommitActIdxTable
-	$AuthorsCommitTrend
-	$ActivityByWeekdayFunc
-	$ActivityByWeekdayAllTable
+    $LoCChurnTable  
+    $ContriLoCTable
+    $AvgLoCTable
+    $FileCountTable
+    $FileTypeCountTable
+    $DirSizePie
+    $DirSizeLine
+    $DirFileCountPie
+    $CommitActIdxTable
+    $AuthorsCommitTrend
+    $ActivityByWeekdayFunc
+    $ActivityByWeekdayAllTable
     $ActivityByWeekdayRecentTable
     $ActivityByTimeOfDayFunc
     $ActivityByTimeOfDayAllTable
-	$ActivityByTimeOfDayRecentTable
-	$AuthorActivityGraph
-	$DailyCommitCountGraph
+    $ActivityByTimeOfDayRecentTable
+    $AuthorActivityGraph
+    $DailyCommitCountGraph
     $WasteEffortTrend
-
+    $doAuthorCommitTrend90pc   
+    $AuthorCommitTrend90pc
+    $AuthorCommitTrendRecent90pc
+    
     <script type="text/javascript">
-			 function showAllGraphs(showLegend) {
-                    locgraph('LoCGraph', showLegend);
-                    /* Not there in this template
-					locChurnGraph('LoCChurnGraph', showLegend);*/                    
-                    contri_locgraph('ContriLoCGraph', showLegend);
-                    avglocgraph('AvgLoCGraph',showLegend);
-                    fileCountGraph('FileCountGraph',showLegend);
-                    fileTypesGraph('FileTypeCountGraph',showLegend);
-                    ActivityByWeekdayAll('ActivityByWeekdayAllGraph',showLegend);
-                    ActivityByWeekdayRecent('ActivityByWeekdayRecentGraph',showLegend);
-                    ActivityByTimeOfDayAll('ActivityByTimeOfDayAllGraph',showLegend);
-                    ActivityByTimeOfDayRecent('ActivityByTimeOfDayRecentGraph',showLegend);
-                    CommitActivityIndexGraph('CommitActIdxGraph',showLegend);
-                    directorySizePieGraph('DirSizePie', showLegend);
-                    dirFileCountPieGraph('DirFileCountPie', showLegend);
-                    dirSizeLineGraph('DirSizeLine', showLegend);
-                    authorsCommitTrend('AuthorsCommitTrend',showLegend);
-                    authorActivityGraph('AuthorActivityGraph', showLegend);
-                    dailyCommitCountGraph('DailyCommitCountGraph', showLegend);
-                    wasteEffortTrend('WasteEffortTrend', showLegend);
-                };
-                
-                function showGraphBox(graphFunc, showLegend) {
-                    var graphboxId = 'GraphPopBox';
-                    var graphBoxElem = document.getElementById(graphboxId);
-                    graphBoxElem.style.display='block';
-                    var graphCanvasId = 'Graph_big'
-                    var plot = graphFunc(graphCanvasId, showLegend);
-                    plot.redraw(true);                                                    
-                };
-                
-                function hideGraphBox() {
-                    var graphboxId = 'GraphPopBox';
-                    var graphBoxElem = document.getElementById(graphboxId);
-                    graphBoxElem.style.display='none';
-                };
+        function showAllGraphs(showLegend) {
+               locgraph('LoCGraph', showLegend);
+               /* Not there in this template*/
+               locChurnGraph('LoCChurnGraph', showLegend);
+               contri_locgraph('ContriLoCGraph', showLegend);
+               avglocgraph('AvgLoCGraph',showLegend);
+               fileCountGraph('FileCountGraph',showLegend);
+               fileTypesGraph('FileTypeCountGraph',showLegend);
+               ActivityByWeekdayAll('ActivityByWeekdayAllGraph',showLegend);
+               ActivityByWeekdayRecent('ActivityByWeekdayRecentGraph',showLegend);
+               ActivityByTimeOfDayAll('ActivityByTimeOfDayAllGraph',showLegend);
+               ActivityByTimeOfDayRecent('ActivityByTimeOfDayRecentGraph',showLegend);
+               CommitActivityIndexGraph('CommitActIdxGraph',showLegend);
+               directorySizePieGraph('DirSizePie', showLegend);
+               dirFileCountPieGraph('DirFileCountPie', showLegend);
+               dirSizeLineGraph('DirSizeLine', showLegend);
+               authorsCommitTrend('AuthorsCommitTrend',showLegend);
+               authorActivityGraph('AuthorActivityGraph', showLegend);
+               dailyCommitCountGraph('DailyCommitCountGraph', showLegend);
+               wasteEffortTrend('WasteEffortTrend', showLegend);
+               AuthorCommitTrend90pc('AuthorCommitTrend90pc', showLegend);
+               AuthorCommitTrendRecent90pc('AuthorCommitTrendRecent90pc', showLegend);
+               showTagClouds();
+           };
+           
+           function showGraphBox(graphFunc, showLegend) {
+               var graphboxId = 'GraphPopBox';
+               var graphBoxElem = document.getElementById(graphboxId);
+               graphBoxElem.style.display='block';
+               var graphCanvasId = 'Graph_big'
+               var plot = graphFunc(graphCanvasId, showLegend);
+               plot.redraw(true);                                                    
+           };
+           
+           function hideGraphBox() {
+               var graphboxId = 'GraphPopBox';
+               var graphBoxElem = document.getElementById(graphboxId);
+               graphBoxElem.style.display='none';
+           };
 
-                function showCloud(cloudData, w, h){
-                    var fill = d3.scale.category20();
-
-                    d3.layout.cloud().size([w, h])
-                    .words(cloudData.map(function(x) {
-                          return {text: x[0], size: x[1]};
-                          }))
+            function showCloud(wordsAndFreq, idSel, fillScale){
+                var fill = fillScale;
+    
+                var selElem = d3.select(idSel);
+                var w = parseInt(selElem.style("width"))-10;
+                var h = parseInt(selElem.style("height"))-10;
+    
+                var minFreq = d3.min(wordsAndFreq, function(d) { return d.count});
+                var maxFreq = d3.max(wordsAndFreq, function(d) { return d.count});
+    
+                var fontSize = d3.scale.log();
+                fontSize.domain([minFreq, maxFreq]);
+                fontSize.range([15,100])
+    
+                d3.layout.cloud()
+                    .size([w, h])
+                    .words(wordsAndFreq)
                     .padding(2)
-                    .rotate(function() { return ~~(Math.random() * 90); })
+                    .rotate(function() { return 0;})
                     .font("Impact")
-                    .fontSize(function(d) { return d.size;})
+                    .fontSize(function(d) { return fontSize(d.count);})
                     .on("end", draw)
                     .start();
-                     
-                    function draw(words) {
-                        d3.select("body").append("svg")
-                            .attr("width", w)
-                            .attr("height", h)
-                          .append("g")
-                            .attr("transform", "translate(" + [w/2, h/2] + ")") 
-                          .selectAll("text")
+    
+                function draw(words) {
+                        d3.select(idSel).append("svg")
+                        .append("g")
+                            .attr("transform", "translate(" + [w/2, h/2] + ")")
+                        .selectAll("text")
                             .data(words)
-                          .enter().append("text")
-                            .style("font-size", function(d) { return d.size + "px"; })
+                        .enter().append("text")
+                            .style("font-size", function(d) { return fontSize(+d.count)+ "px"; })
                             .style("font-family", "Impact")
-                            .style("fill", function(d, i) {return fill(i);})
+                            .style("fill", function(d, i) {return fill(d.color);})
                             .on("mouseover", function(){d3.select(this).style("fill", "black");})
-                            .on("mouseout", function(d, i){d3.select(this).style("fill", fill(i));})
+                            .on("mouseout", function(d, i){d3.select(this).style("fill", fill(d.color));})
                             .attr("text-anchor", "middle")
                             .attr("transform", function(d) {
-                              return "translate(" + [d.x, d.y] + ")rotate(" + d.rotate + ")";
+                                return "translate(" + [d.x, d.y] + ")rotate(" + d.rotate + ")";
                             })
                             .text(function(d) { return d.text; });
-                      }
-                };
-	</script>
+                }
+        };
+
+        function showTagClouds() {
+            var logMsgCloudData = $TagCloud;
+            var fillScale = function(d) { return d3.rgb(0,0,0); }
+            console.log("LogMsg Cloud display");
+            showCloud(logMsgCloudData, '#LogMsgCloud', fillScale);
+
+            var authCloudData = $AuthCloud;
+
+            // color is author activity index
+            var minColor = 0, maxColor=0;
+            // color scale is reversed ColorBrewer RdYlBu (heatmap colors)
+            var colors =  ["#a50026", "#d73027","#f46d43","#fdae61","#fee090","#ffffbf",
+                            "#e0f3f8","#abd9e9","#74add1","#4575b4","#313695"];
+            colors.reverse();
+            var fill =  d3.scale.linear();
+            fill.range(colors);
+
+            minColor = d3.min(authCloudData, function(d) { return d.color});
+            maxColor = d3.max(authCloudData, function(d) { return d.color});
+            var step = (Math.log(maxColor+1)-Math.log(minColor))/colors.length;
+            fill.domain(d3.range(Math.log(minColor), Math.log(maxColor+1), step));
+
+            console.log("Author Cloud display");
+            showCloud(authCloudData, "#AuthorCloud", fill);
+        }
+
+    </script>
 </head>
 <body onLoad="showAllGraphs(false);">
-<table align="center" frame="box">
+<table class="charts" align="center" frame="box">
 <caption><h1 align="center">Subversion Statistics for $RepoName</h1></caption>
 <tr>
 <th colspan=3 align="center"><h3>General Statistics</h3></th>
@@ -257,6 +321,15 @@ HTMLIndexTemplate ='''<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional/
     </td>
     <td align="center">
     <div id="AvgLoCGraph" class="graph" onclick ="showGraphBox(avglocgraph, true);"></div>
+    </td>    
+</tr>
+<tr>
+    <td align="center">
+        <div id="LoCChurnGraph" class="graph" onclick ="showGraphBox(locChurnGraph, true);"></div>
+    </td>
+    <td align="center">
+    </td>
+    <td align="center">
     </td>    
 </tr>
 <tr>
@@ -321,16 +394,26 @@ HTMLIndexTemplate ='''<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional/
         <div id="WasteEffortTrend" class="graph" onclick ="showGraphBox(wasteEffortTrend, true);"></div>
     </td>    
 </tr>
-</table>
-<table width="100%">
-<th><h3>Log Message Tag Cloud</h3></th>
-<script type="text/javascript"> showCloud($TagCloud, 960, 300);</script>
-</table>
-<table width="100%">
-<th align="center"><h3>Author Cloud</h3></th>
-<td align="center"><script type="text/javascript">onLoad = showCloud($AuthCloud, 960, 300);</script></td>
-</table>
+<tr>
+    <td align="center" >
+        <div id="AuthorCommitTrend90pc" class="graph" onclick ="showGraphBox(AuthorCommitTrend90pc, true);"></div>
+    </td>
+    
+    <td align="center">
+        <div id="AuthorCommitTrendRecent90pc" class="graph" onclick ="showGraphBox(AuthorCommitTrendRecent90pc, true);"></div>
+    </td>
+    <td align="center">        
+    </td>    
 </tr>
+</table>
+
+<div>
+    <h3>Log Message Tag Cloud</h3>
+    <div id="LogMsgCloud"></div>
+    <h3>Author Cloud</h3>
+    <div id="AuthorCloud"></div>
+</div>
+    
     <div id="GraphPopBox">
         <h3 id="closebtn" onClick="hideGraphBox();">Close[X]</h3>
         <div id="Graph_big"></div>
@@ -360,7 +443,8 @@ class SVNPlotJS(SVNPlotBase):
     def AllGraphs(self, dirpath, svnsearchpath='/', thumbsize=200, maxdircount = 10, copyjs=True):
         self.svnstats.SetSearchPath(svnsearchpath)
         #LoC and FileCount Graphs
-        graphParamDict = self._getGraphParamDict(thumbsize, maxdircount)
+        recentMonths = 3
+        graphParamDict = self._getGraphParamDict(thumbsize, maxdircount,recentMonths )
         
         htmlidxname = os.path.join(dirpath, "index.htm")
         htmlidxTmpl = string.Template(self.template)
@@ -401,7 +485,7 @@ class SVNPlotJS(SVNPlotBase):
         
         template = '''
             function ActivityByWeekdayAll(divElemId,showLegend) {
-            var data = [$DATA];
+            var data = $DATA;
             var titletext = 'Commits by Day of Week (All time)'
             var plot = doActivityByWeekday(divElemId, data, titletext, showLegend);
             return(plot);
@@ -409,10 +493,10 @@ class SVNPlotJS(SVNPlotBase):
         '''
         assert(len(data) == len(labels))
         
-        datalist = [ "['%s',%d]" % (wkday, actdata) for actdata, wkday in zip(data, labels)]
-        data = ','.join(datalist)
+        datalist = [(wkday, actdata) for actdata, wkday in zip(data, labels)]
+        datajson = json.dumps(datalist)
 
-        return(self.__getGraphScript(template, {"DATA":data}))
+        return(self.__getGraphScript(template, {"DATA":datajson}))
 
     def ActivityByWeekdayRecent(self, months=3):
         self._printProgress("Calculating Activity by day of week graph")
@@ -421,7 +505,7 @@ class SVNPlotJS(SVNPlotBase):
         
         template = '''
             function ActivityByWeekdayRecent(divElemId,showLegend) {
-            var data = [$DATA];
+            var data = $DATA;
             var titletext = 'Commits by Day of Week (%d months)'
             var plot = doActivityByWeekday(divElemId, data, titletext, showLegend);
             return(plot);
@@ -430,8 +514,8 @@ class SVNPlotJS(SVNPlotBase):
         template = template % months
         assert(len(data) == len(labels))
         
-        datalist = [ "['%s',%d]" % (wkday, actdata) for actdata, wkday in zip(data, labels)]
-        data = ','.join(datalist)
+        datalist = [(wkday, actdata) for actdata, wkday in zip(data, labels)]
+        datajson = json.dumps(datalist)
 
         return(self.__getGraphScript(template, {"DATA":data}))
 
@@ -465,7 +549,7 @@ class SVNPlotJS(SVNPlotBase):
         
         template = '''        
             function ActivityByTimeOfDayAll(divElemId,showLegend) {
-            var data = [$DATA];
+            var data = $DATA;
             var titletext = 'Commits By Hour of Day (All time)'
             var plot = doActivityByTimeOfDay(divElemId, data, titletext,showLegend);
             return(plot);
@@ -473,9 +557,8 @@ class SVNPlotJS(SVNPlotBase):
         '''
         assert(len(data) == len(labels))
 
-        datalist = ["['%s',%d]" % (tmofday, actdata)  for actdata, tmofday in zip(data, labels)]
-                    
-        data = ','.join(datalist)
+        datalist = [(tmofday, actdata)  for actdata, tmofday in zip(data, labels)]            
+        datajson = json.dumps(datalist)
 
         return(self.__getGraphScript(template, {"DATA":data}))
 
@@ -514,7 +597,7 @@ class SVNPlotJS(SVNPlotBase):
             var locdata = [$DATA];
             var plot = $.jqplot(divElemId, [locdata], {
                 title:'Commit Activity Index over time',
-                axes:{xaxis:{renderer:$.jqplot.DateAxisRenderer}},
+                axes:{xaxis:{renderer:$.jqplot.DateAxisRenderer, showTicks:showLegend}},
                 series:[{lineWidth:2, markerOptions:{style:'filledCircle',size:2}}]}
                 );
                 return(plot);    
@@ -534,11 +617,15 @@ class SVNPlotJS(SVNPlotBase):
         template = '''  
             function locgraph(divElemId,showLegend) {
             var locdata = [$DATA];
+            var loclabel = '';
+            if(showLegend) {
+                loclabel = 'LoC';
+            }
             var plot = $.jqplot(divElemId, [locdata], {
                 title:'Lines of Code',
                 axes:{
-                    xaxis:{renderer:$.jqplot.DateAxisRenderer, label:'LoC'},
-                    yaxis:{min:0}
+                    xaxis:{renderer:$.jqplot.DateAxisRenderer, showTicks:showLegend},
+                    yaxis:{min:0,label:loclabel, showTicks:showLegend}
                 },
                 series:[{lineWidth:2, markerOptions:{style:'filledCircle',size:2}}]}
                 );
@@ -558,13 +645,17 @@ class SVNPlotJS(SVNPlotBase):
         template = '''
             function contri_locgraph(divElemId, showLegend) {
             $LOCDATA
+            var loclabel = '';
+            if(showLegend) {
+                loclabel='LoC';
+            }
              var plot = $.jqplot(divElemId, locdata, {
                 legend:{show:showLegend}, 
                 title:'Contributed Lines of Code',
                 axes:
                 {
-                    xaxis:{renderer:$.jqplot.DateAxisRenderer, label:'LoC'},
-                    yaxis:{min:0}
+                    xaxis:{renderer:$.jqplot.DateAxisRenderer, showTicks:showLegend},
+                    yaxis:{min:0, label:loclabel, showTicks:showLegend}
                 },
                 series:$SERIESDATA
                 });
@@ -575,15 +666,15 @@ class SVNPlotJS(SVNPlotBase):
         authList = self.svnstats.getAuthorList(self.authorsToDisplay)
         authLabelList = []
         
-        outstr = StringIO.StringIO()
+        outstr = StringIO()
         idx =0        
         for author in authList:
             dates, loc = self.svnstats.getLoCTrendForAuthor(author)
             if( len(dates) > 0):
-                outstr.write("var auth%dLocData = [" % idx)
-                datalist = ['[\'%s\', %d]' % (date,lc) for date, lc in zip(dates, loc)]            
-                outstr.write(',\n'.join(datalist))
-                outstr.write("];\n")
+                outstr.write("var auth%dLocData =" % idx)
+                datalist = [('%s' % date,lc) for date, lc in zip(dates, loc)]
+                json.dump(datalist, outstr)
+                outstr.write(";\n")
                 authLabelList.append(self._getAuthorLabel(author).replace('\n', '\\n'))
                 idx = idx+1
             
@@ -593,13 +684,9 @@ class SVNPlotJS(SVNPlotBase):
         outstr.write("];\n")
         locdatastr = outstr.getvalue()
 
-        outstr = StringIO.StringIO()
-        outstr.write("[")
-        datalist = ["{label:'%s', lineWidth:2, markerOptions:{style:'filledCircle',size:2}}" % author for author in authLabelList]
-        outstr.write(',\n'.join(datalist))            
-        outstr.write("]")
-            
-        seriesdata = outstr.getvalue()            
+        datalist = [{'label':author, 'lineWidth':2, 'markerOptions':{'style':'filledCircle','size':2}} for author in authLabelList]
+        seriesdata = json.dumps(datalist,outstr)
+        
         return(self.__getGraphScript(template, {"LOCDATA":locdatastr, "SERIESDATA":seriesdata}))
     
             
@@ -607,16 +694,23 @@ class SVNPlotJS(SVNPlotBase):
         self._printProgress("Calculating LoC and Churn graph")
 
         template = '''
-            function locChurnGraph(divElemId, showLegend) {
-            var locdata = [$LOCDATA];
-            var churndata= [$CHURNDATA];
+            function locChurnGraph(divElemId, showlegend) {
+            var locdata = $LOCDATA;
+            var churndata= $CHURNDATA;
             
+            var loclabel = '';
+            var churnlabel = '';
+            if(showlegend==true) {
+                loclabel = 'LoC'; churnlabel='Churn';
+            }
             var plot = $.jqplot(divElemId, [locdata, churndata], {
                 title:'Lines of Code and Churn Graph',
-                legend:{show:showLegend},
-                axes:{ xaxis:{renderer:$.jqplot.DateAxisRenderer},
-                    yaxis:{label:'LoC', min:0},
-                    y2axis:{label:'Churn', min:0} },
+                legend:{show:showlegend},
+                axes:{
+                    xaxis:{renderer:$.jqplot.DateAxisRenderer, showTicks:showlegend},
+                    yaxis:{label:loclabel, min:0, showTicks:showlegend},
+                    y2axis:{label:churnlabel, min:0, showTicks:showlegend}
+                },
                 series:[
                     {label:'LoC', lineWidth:2, markerOptions:{style:'filledCircle',size:2}},
                     {label:'Churn',yaxis:'y2axis',lineWidth:2, markerOptions:{style:'filledCircle',size:2}}
@@ -628,13 +722,13 @@ class SVNPlotJS(SVNPlotBase):
 
         dates, loc = self.svnstats.getLoCStats()
         assert(len(dates) == len(loc))
-        datalist = ['[\'%s\', %d]' % (date,lc) for date, lc in zip(dates, loc)]        
-        locdatastr = ',\n'.join(datalist)
+        datalist = [('%s'%dt,lc) for dt, lc in zip(dates, loc)]        
+        locdatastr = json.dumps(datalist)
         
         dates, churnlist = self.svnstats.getChurnStats()
 
-        datalist = ['[\'%s\', %d]' % (date,churn) for date, churn in zip(dates, churnlist)]        
-        churndatastr = ',\n'.join(datalist)
+        datalist = [('%s' % dt,churn) for dt, churn in zip(dates, churnlist)]        
+        churndatastr = json.dumps(datalist)
          
         return(self.__getGraphScript(template, {"LOCDATA":locdatastr, "CHURNDATA":churndatastr}))                
         
@@ -646,7 +740,7 @@ class SVNPlotJS(SVNPlotBase):
             var data = [$DATA];
             var plot = $.jqplot(divElemId, [data], {
                 title:'File Count',
-                axes:{xaxis:{renderer:$.jqplot.DateAxisRenderer},yaxis:{min:0}},
+                axes:{xaxis:{renderer:$.jqplot.DateAxisRenderer,showTicks:showLegend},yaxis:{min:0}},
                 series:[{lineWidth:2, markerOptions:{style:'filledCircle',size:2}}]}
                 );
               return(plot);
@@ -699,7 +793,7 @@ class SVNPlotJS(SVNPlotBase):
             var locdata = [$LOCDATA];
             var plot = $.jqplot(divElemId, [locdata], {
                 title:'Average File LoC',
-                axes:{xaxis:{renderer:$.jqplot.DateAxisRenderer},yaxis:{min:0}},
+                axes:{xaxis:{renderer:$.jqplot.DateAxisRenderer, showTicks:showLegend},yaxis:{min:0,showTicks:showLegend}},
                 series:[{lineWidth:2, markerOptions:{style:'filledCircle',size:2}}]}
                 );
                 return(plot);
@@ -860,7 +954,7 @@ class SVNPlotJS(SVNPlotBase):
         dirlist, dirsizelist = self.svnstats.getDirLoCStats(depth, maxdircount)
         numDirs = len(dirlist)
 
-        outstr = StringIO.StringIO()
+        outstr = StringIO()
         
         for dirname, idx in zip(dirlist, range(0, numDirs)):
             dates, loclist = self.svnstats.getDirLocTrendStats(dirname)
@@ -914,6 +1008,108 @@ class SVNPlotJS(SVNPlotBase):
 
         return(self.__getGraphScript(template, {"DATA":data}))
     
+    def doAuthorCommitTrend90pc(self):
+        '''
+        define a common javascript function to be used by 'All time author commit trend'
+        and 'recent author commit trend'
+        '''
+        template = '''        
+        function doAuthorCommitTrend90pc(divElemId,data, titleText, showLegend) {
+            var plot = $.jqplot(divElemId, [data], {
+                title:titleText,
+                axes:{
+                    xaxis:{
+                        renderer:$.jqplot.CategoryAxisRenderer,
+                        tickRenderer: $.jqplot.CanvasAxisTickRenderer ,
+                        tickOptions: {
+                            angle: -30,                        
+                        },
+                        showTicks : showLegend,
+                        showLabel: showLegend
+                    },
+                    yaxis:{
+                        min:0,
+                        labelRenderer: $.jqplot.CanvasAxisLabelRenderer,
+                        label : 'days',
+                        showLabel:showLegend
+                    }
+                },
+                series: [{renderer:$.jqplot.OHLCRenderer,
+                        rendererOptions:{
+                            candleStick:false
+                        }
+                    }],
+                highlighter: {
+                    show: showLegend,
+                    showMarker:false,
+                    tooltipAxes: 'y',
+                    yvalues: 4,
+                    // You can customize the tooltip format string of the highlighter
+                    // to include any arbitrary text or html and use format string
+                    // placeholders (%s here) to represent x and y values.
+                    formatString:'<table class="jqplot-highlighter"> \
+                    <tr><td>Average</td><td>%s</td></tr> \
+                    <tr><td>Upper limit</td><td>%s</td></tr> \
+                    <tr><td>Lower Limit</td><td>%s</td></tr> \
+                    </table>'
+                  }
+            });
+            return(plot);
+        };
+        '''
+        return(self.__getGraphScript(template, {}))
+    
+    def AuthorCommitTrend90pc(self):
+        '''
+        get the range of average and 90% confidence interval for author commits.
+        And generate a 'candle stick' chart of author against, the min value, avereage and max value
+        '''
+        self._printProgress("Calculating Author commits trend 90% confidence graph")
+        
+        authlist, avglist, confidencelist = self.svnstats.getAuthorsCommitTrend90pc()
+        assert(len(authlist) == len(avglist))
+        assert(len(authlist) == len(confidencelist))
+        
+        template = '''        
+            function AuthorCommitTrend90pc(divElemId,showLegend) {
+                var data = $DATA;
+                var titleText = 'Authors Commit Trend (Average and 90% Confidence Interval)';
+                var plot = doAuthorCommitTrend90pc(divElemId, data, titleText, showLegend);
+                return(plot);
+            };
+        '''
+        
+        datalist = [(author, avg, avg+confidence, max(0, avg-confidence),avg) for author, avg, confidence in zip(authlist, avglist, confidencelist)]
+        data_json = json.dumps(datalist)
+        
+        return(self.__getGraphScript(template, {"DATA":data_json}))
+    
+    def AuthorCommitTrendRecent90pc(self,months=3):
+        '''
+        get the range of average and 90% confidence interval for author commits.
+        And generate a 'candle stick' chart of author against, the min value, avereage and max value
+        (recent usually last 3 months)
+        '''
+        self._printProgress("Calculating Author commits trend 90% confidence graph for recent")
+        
+        authlist, avglist, confidencelist = self.svnstats.getAuthorsCommitTrend90pc(months)
+        assert(len(authlist) == len(avglist))
+        assert(len(authlist) == len(confidencelist))
+        
+        template = '''        
+            function AuthorCommitTrendRecent90pc(divElemId,showLegend) {
+                var data = $DATA;
+                var titleText = 'Authors Commit Trend (Average and 90% Confidence Interval) Recent';
+                var plot = doAuthorCommitTrend90pc(divElemId, data, titleText, showLegend);
+                return(plot);
+        };
+        '''
+        
+        datalist = [(author, avg, avg+confidence, max(0, avg-confidence),avg) for author, avg, confidence in zip(authlist, avglist, confidencelist)]
+        data_json = json.dumps(datalist)
+        
+        return(self.__getGraphScript(template, {"DATA":data_json}))
+    
     def DailyCommitCountGraph(self):
         self._printProgress("Calculating Daily commit count graph")
         
@@ -961,7 +1157,7 @@ class SVNPlotJS(SVNPlotBase):
         
         return(self.__getGraphScript(template, {"DATA":outstr}))
         
-    def _getGraphParamDict(self, thumbsize, maxdircount = 10):
+    def _getGraphParamDict(self, thumbsize, maxdircount = 10, recentmonths=3):
         graphParamDict = dict()
             
         graphParamDict["thumbwid"]= "%dpx" % thumbsize
@@ -984,10 +1180,10 @@ class SVNPlotJS(SVNPlotBase):
         graphParamDict["FileTypeCountTable"] = self.FileTypesGraph()
         graphParamDict["ActivityByWeekdayFunc"] = self.ActivityByWeekdayFunc()
         graphParamDict["ActivityByWeekdayAllTable"] = self.ActivityByWeekdayAll()
-        graphParamDict["ActivityByWeekdayRecentTable"] = self.ActivityByWeekdayRecent(3)
+        graphParamDict["ActivityByWeekdayRecentTable"] = self.ActivityByWeekdayRecent(recentmonths)
         graphParamDict["ActivityByTimeOfDayFunc"] = self.ActivityByTimeOfDayFunc()
         graphParamDict["ActivityByTimeOfDayAllTable"] = self.ActivityByTimeOfDayAll()
-        graphParamDict["ActivityByTimeOfDayRecentTable"] = self.ActivityByTimeOfDayRecent(3)
+        graphParamDict["ActivityByTimeOfDayRecentTable"] = self.ActivityByTimeOfDayRecent(recentmonths)
         graphParamDict["CommitActIdxTable"] = self.CommitActivityIdxGraph()
         graphParamDict["LoCChurnTable"] = self.LocChurnGraph()
         graphParamDict["DirSizePie"] = self.DirectorySizePieGraph(self.dirdepth, maxdircount)
@@ -998,6 +1194,9 @@ class SVNPlotJS(SVNPlotBase):
         graphParamDict["DailyCommitCountGraph"] = self.DailyCommitCountGraph()
         graphParamDict["WasteEffortTrend"] = self.WasteEffortTrend()
         
+        graphParamDict["doAuthorCommitTrend90pc"] = self.doAuthorCommitTrend90pc()
+        graphParamDict["AuthorCommitTrend90pc"] = self.AuthorCommitTrend90pc()
+        graphParamDict["AuthorCommitTrendRecent90pc"] = self.AuthorCommitTrendRecent90pc(recentmonths)
         return(graphParamDict)
                 
     def printAnomalies(self, searchpath='/%'):
@@ -1016,13 +1215,18 @@ class SVNPlotJS(SVNPlotBase):
         '''
         copy the neccessary javascript files of jquery, excanvas and jqPlot to the output directory        
         '''
-        jsFileList = ['excanvas.compiled.js', 'jquery.min.js',
+        jsFileList = ['excanvas.min.js', 'jquery.min.js',
                       'jqplot/jquery.jqplot.js', 'jqplot/jquery.jqplot.min.css',
                       'jqplot/plugins/jqplot.dateAxisRenderer.min.js',
                       'jqplot/plugins/jqplot.categoryAxisRenderer.min.js',
                       'jqplot/plugins/jqplot.barRenderer.min.js',
                       'jqplot/plugins/jqplot.dateAxisRenderer.min.js',
                       'jqplot/plugins/jqplot.pieRenderer.min.js',
+                      'jqplot/plugins/jqplot.ohlcRenderer.min.js',
+                      'jqplot/plugins/jqplot.canvasTextRenderer.min.js',
+                      'jqplot/plugins/jqplot.canvasAxisTickRenderer.min.js',
+                      'jqplot/plugins/jqplot.canvasAxisLabelRenderer.min.js',
+                      'jqplot/plugins/jqplot.highlighter.min.js',
                       'd3.v3/d3.layout.cloud.js',
                       'd3.v3/d3.v3.js']
         

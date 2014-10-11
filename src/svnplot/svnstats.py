@@ -20,7 +20,7 @@ import math
 import operator
 from collections import Counter
 
-from .util import *
+from util import *
 
 COOLINGRATE = 0.06/24.0 #degree per hour
 TEMPINCREMENT = 10.0 # degrees per commit
@@ -48,7 +48,7 @@ def getTemperatureAtTime(curTime, lastTime, lastTemp, coolingRate):
         tempFactor = -(coolingRate*hrsSinceLastTime)
         temperature = AMBIENT_TEMP + (lastTemp-AMBIENT_TEMP)*math.exp(tempFactor)
         assert(temperature>=AMBIENT_TEMP)
-    except Exception, expinst:  
+    except Exception, expinst:
         logging.debug("Error %s" % expinst)
         temperature = 0
         
@@ -87,53 +87,44 @@ def histogram_data(binlist, indata):
             
     return(binvalues)
         
-class DeltaAvg:
-    '''
-    DeltaAvg class implements a 'delta' average aggregate function. It calculates the
-    average value of difference between consecutive rows.
-    '''
-    def __init__(self):
-        self.delta_sum = 0
-        self.lastval = None
-        self.count = 0
-        
-    def step(self, value):
-        if( self.lastval != None):                
-            self.delta_sum = self.delta_sum+ (value - self.lastval)
-            self.count = self.count+1
-        self.lastval = value
-                
-    def finalize(self):
-        avg = 0.0
-        if( self.count > 0):
-            avg = (float(self.delta_sum)/self.count)
-        return(avg)
 
 class DeltaStdDev:
     '''
     tries to calculate standard deviation in single pass. It calculates the
     standard deviation value of difference between consecutive rows
+    based on http://www.johndcook.com/standard_deviation.html
     '''
     def __init__(self):
-        self.delta_sum = 0.0
-        self.delta_sq = 0.0
-        self.lastval = None
+        self.m_oldMean = 0.0
+        self.m_newMean= 0.0
+        self.m_oldS = 0.0
+        self.m_newS = 0.0
         self.count = 0
+        self.lastval = None
 
-    def step(self, value):
-        if( self.lastval != None):            
-            delta = (value - self.lastval)
-            self.delta_sum = self.delta_sum + delta
-            self.delta_sq = self.delta_sq + (delta*delta)
+    def step(self, curval):        
+        if self.lastval:
             self.count = self.count+1
-        self.lastval = value                
+            value = curval-self.lastval
+            if (self.count == 1):
+                self.m_oldMean = value
+                self.m_newMean = value
+                self.m_oldS = 0.0;
+            else:
+                self.m_newMean = self.m_oldMean + (value - self.m_oldMean)/self.count;
+                self.m_newS = self.m_oldS + (value - self.m_oldMean)*(value - self.m_newMean);
+        
+                #set up for next iteration
+                self.m_oldMean = self.m_newMean; 
+                self.m_oldS = self.m_newS;            
+        self.lastval=curval
         
     def finalize(self):
         stddev = 0.0
-        if( self.count > 0):
-            avg = (float(self.delta_sum)/self.count)
-            stddev = self.delta_sq/self.count- (avg*avg)
-            stddev = math.sqrt(stddev)                        
+        if( self.count > 1):
+            avg = self.m_newMean
+            variance = self.m_newS/(self.count - 1)             
+            stddev = math.sqrt(variance)
         return(stddev)
 
 def sqlite_daynames():
@@ -168,17 +159,39 @@ class SVNStats(object):
         #InitSqlite
         self.dbcon = sqlite3.connect(self.svndbpath, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
         #self.dbcon.row_factory = sqlite3.Row
+        
+        self.__create_db_functions()
+                                    
+        self.cur = self.dbcon.cursor()
+        #set the LIKE operator to case sensitive behavior
+        self.cur.execute("pragma case_sensitive_like(TRUE)")
+        
+        self.__init_start_end_revisions(firstrev,lastrev)
+        
+                
+    def __create_db_functions(self):
+        '''
+        create various database and aggregation functions required
+        '''
         # Create the function "regexp" for the REGEXP operator of SQLite
         self.dbcon.create_function("dirname", 3, dirname)
         self.dbcon.create_function("filetype", 1, filetype)
         self.dbcon.create_function("getTemperatureAtTime", 4, getTemperatureAtTime)
         self.dbcon.create_function("sqrt", 1, _sqrt)
-        self.dbcon.create_aggregate("deltaavg", 1, DeltaAvg)
         self.dbcon.create_aggregate("deltastddev", 1, DeltaStdDev)
-                                    
-        self.cur = self.dbcon.cursor()
-        #set the LIKE operator to case sensitive behavior
-        self.cur.execute("pragma case_sensitive_like(TRUE)")
+        
+        #it is possible, index is already there. in such cases ignore the exception
+        try:
+            #create an index based on author names as we need various author based
+            #statistics
+            self.cur.execute("CREATE TEMP INDEX SVNLogAuthIdx ON SVNLog (author ASC)")
+        except:
+            pass
+        
+    def __init_start_end_revisions(self, firstrev, lastrev):
+        '''
+        initialize the start and end revision numbers and start/end dates for queries 
+        '''
         self.cur.execute("select max(commitdate),min(commitdate) from SVNLog")
         onedaydiff = datetime.timedelta(1)
         row = self.cur.fetchone()
@@ -304,8 +317,8 @@ class SVNStats(object):
         '''
         return the sql regex search path (e.g. '/trunk/' will be returned as '/trunk/%'
         '''
-        return(self.__searchpath + '%')
-        
+        return(self.__searchpath + '%')    
+    
     def isDateInRange(self, cmdate):
         valid = True
         if( self.__startDate != None and self.__startDate > cmdate):
@@ -364,8 +377,8 @@ class SVNStats(object):
             
         else:
             query= "select strftime('%%w', SVNLog.commitdate, 'localtime') as dayofweek, count(SVNLog.revno) from SVNLog, search_view \
-                         where search_view.revno=SVNLog.revno and date('now', '-%d month') < SVNLog.commitdate \
-                        group by dayofweek" % (months)
+                         where search_view.revno=SVNLog.revno and date('%s', '-%d month') < SVNLog.commitdate \
+                        group by dayofweek" % (self.__endDate, months)
             
         self.cur.execute(query)
 
@@ -394,8 +407,8 @@ class SVNStats(object):
             
         else:
             query= "select strftime('%%H', SVNLog.commitdate,'localtime') as hourofday, count(SVNLog.revno) from SVNLog, search_view \
-                          where search_view.revno=SVNLog.revno and date('now', '-%d month') < SVNLog.commitdate \
-                          group by hourofday " % (months)
+                          where search_view.revno=SVNLog.revno and date('%s', '-%d month') < SVNLog.commitdate \
+                          group by hourofday " % (self.__endDate, months)
             
         self.cur.execute(query)
         commits = dict()
@@ -633,7 +646,7 @@ class SVNStats(object):
         
         return(dirlist, dirfilecountlist)
 
-    def getDirLoCStats(self, dirdepth=2, maxdircount=10):
+    def getDirLoCStats(self, dirdepth=2, maxdircount=10, mindirsize_percent =5 ):
         '''
         dirdepth - depth of directory search relative to search path. Default value is 2
         returns two lists (directory names upto dirdepth and total line count of files in that directory (including
@@ -647,19 +660,25 @@ class SVNStats(object):
             
             
         dirinfolist = []
+        totalloc = 0
         for dirname, linesadded, linesdeleted in self.cur:
             dsize = linesadded-linesdeleted
             if( dsize > 0):
                 dirinfolist.append((dirname, dsize))
-                
+            totalloc = totalloc+dsize
+            
         if maxdircount > 0 and len(dirinfolist) > maxdircount: 
             '''
             Return only <maxdircount> largest directories
             '''
+            #filter dirinfolist such that all directories with greather 'mindirsize_percent' are retained
+            mindirsize = (mindirsize_percent/100.0)*totalloc
+            dirinfolist = filter(lambda dinfo: dinfo[1]>mindirsize ,dirinfolist)
             dirinfolist.sort(key=lambda dinfo:dinfo[1], reverse=True)
             
-            remainingcount = sum(map(lambda dinfo:dinfo[1], dirinfolist[maxdircount:]), 0)
             dirinfolist = dirinfolist[0:maxdircount]
+            dsizecount = sum(map(lambda dinfo:dinfo[1], dirinfolist), 0)
+            remainingcount = totalloc- dsizecount
             dirinfolist.append(('others', remainingcount))
         
         #sort the directories in such a way that similar paths are together
@@ -1115,7 +1134,7 @@ class SVNStats(object):
             authActivityIdx[author] = (cmdate, revtemp)
             
         #Now update the activity for current date and time.
-        curdate = datetime.datetime.now()
+        curdate = datetime.datetime.combine(self.__endDate, datetime.time(0))
         for author, cmtactv in authActivityIdx.items():
             authtemp = getTemperatureAtTime(curdate, cmtactv[0], cmtactv[1], COOLINGRATE)
             authActivityIdx[author] = (curdate, authtemp)
@@ -1173,7 +1192,7 @@ class SVNStats(object):
         
         #now update the temperature to current temperature and create a list of tuples for
         #sorting.
-        curTime = datetime.datetime.now()
+        curTime = datetime.datetime.combine(self.__endDate, datetime.time(0))
         authlist = []
         for author, cmtactiv in authActivityIdx.items():
             temperature = getTemperatureAtTime(curTime, cmtactiv[0], cmtactiv[1], COOLINGRATE)
@@ -1196,7 +1215,8 @@ class SVNStats(object):
             return((fileparams[0],fileparams[1], count))
             
         self._updateActivityHotness()
-        curTime = datetime.datetime.now()
+        curTime = datetime.datetime.combine(self.__endDate, datetime.time(0))
+        
         self.cur.execute("select ActivityHotness.filepath, \
                 getTemperatureAtTime(?,SVNLog.commitdate,ActivityHotness.temperature,?) as hotness \
                 from ActivityHotness,SVNLog \
@@ -1207,20 +1227,58 @@ class SVNStats(object):
                 
         return(hotfileslist)
         
-    def getAuthorsCommitTrendMeanStddev(self):
+    def getAuthorsCommitTrendMeanStddev(self, months=None):
         '''
         Plot of Mean and standard deviation for time between two consecutive commits by authors.
+        months : if none, calculate mean and std deviation for lifetime. If not none, plot mean
+        and standard deviation for last so many months.
         '''
         authList = self.getAuthorList(20)
         avg_list     = []
         stddev_list  = []
         finalAuthList = []
         
+        #create a query which filters revision log on author and create 'rowid' for each
+        #row. These row ids will be used by subsquent queries to calculate the difference between
+        #two rows.
+    
+        author_filter_view = '''CREATE TEMP VIEW IF NOT EXISTS '%(author)s_view' AS
+                select (select COUNT(0)
+                from SVNLog log_a
+                where log_a.revno >= log_b.revno and log_a.author = '%(author)s'
+                ) as rownum,  log_b.* from SVNLog log_b where log_b.author='%(author)s'
+                ORDER by log_b.commitdate ASC'''
+        
+        stddev_query = "select deltastddev(julianday(SVNLog.commitdate)) from SVNLog where SVNLog.author= ? \
+                    order by SVNLog.commitdate"
+        
+        author_filter_query = '''SELECT * FROM '%(author)s_view' ORDER by commitdate ASC'''
+        
+        if months != None:
+            author_filter_query = '''SELECT * FROM '%(author)s_view'
+                WHERE date('%(endDate)s', '-%(months)s month') < commitdate
+                ORDER by commitdate ASC'''
+            
+            stddev_query = "select deltastddev(julianday(SVNLog.commitdate)) from SVNLog where SVNLog.author= ? \
+                    and date('%s', '-%d month') < SVNLog.commitdate \
+                    order by SVNLog.commitdate" % (self.__endDate, months)
+            
+        avg_query_sql = '''SELECT AVG(IFNULL(julianday(SVNLog_B.commitdate) - julianday(SVNLog_A.commitdate), 0)) 
+                    FROM (%(auth_query)s) as SVNLog_A 
+                    LEFT OUTER JOIN (%(auth_query)s) as SVNLog_B ON SVNLog_A.rownum= (SVNLog_B.rownum+1)
+                    order by SVNLog_A.rownum'''
+
         for auth in authList:
-            self.cur.execute('select deltaavg(julianday(SVNLog.commitdate)), \
-                    deltastddev(julianday(SVNLog.commitdate)) from SVNLog where SVNLog.author= ? order by SVNLog.commitdate'
-                             ,(auth,))
-            avg, stddev = self.cur.fetchone()
+            auth_query = author_filter_view % { 'author':auth, 'endDate' : self.__endDate, 'months' :months}
+            self.cur.execute(auth_query)
+            
+            auth_query = author_filter_query %  { 'author' : auth,'endDate' : self.__endDate, 'months' : months}
+            avg_query = avg_query_sql % { 'auth_query' : auth_query}
+            self.cur.execute(avg_query)
+            
+            avg, = self.cur.fetchone()
+            self.cur.execute(stddev_query, (auth,))
+            stddev, = self.cur.fetchone()
             if( avg != None and stddev != None):
                 finalAuthList.append(auth)
                 avg_list.append(avg)
@@ -1228,6 +1286,23 @@ class SVNStats(object):
                 
         return(finalAuthList, avg_list, stddev_list)
 
+    def getAuthorsCommitTrend90pc(self,  months=None):
+        '''
+        get the range of average and 90% confidence interval for author commits.
+        '''
+        
+        avg_list     = []
+        confidence_list  = []
+        authlist = []
+        confidence_factor = 1.28  # 1.28*std_dev gives the 90% confidence interval
+        
+        data = self.getAuthorsCommitTrendMeanStddev(months)
+        for author, average, stddev in zip(*data):
+            authlist.append(author)
+            avg_list.append(average)
+            confidence_list.append(confidence_factor*stddev)
+        return authlist, avg_list, confidence_list
+        
     def getAuthorsCommitTrendHistorgram(self, binsList):
         '''
         Histogram of time difference between two consecutive commits by same author.
