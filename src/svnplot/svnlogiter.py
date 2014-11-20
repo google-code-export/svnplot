@@ -22,6 +22,7 @@ import tempfile
 from operator import itemgetter
 from StringIO import StringIO
 from svnlogclient import *
+from util import *
 
 class SVNRevLogIter(object):
     def __init__(self, logclient, startRevNo, endRevNo, cachesize=50, bUseFileDiff=False):
@@ -379,17 +380,17 @@ class SVNRevLog(object):
         logging.debug("Changed path count : %d" % len(self.revlog.changed_paths))
         
         for change in self.getChangeEntries():
-                isdir = change.isDirectory()
-                if( isdir == False):
-                    action = change.change_type()                
-                    if(action == 'A'):
-                        filesadded = filesadded+1
-                    elif(action == 'D'):
-                        filesdeleted = filesdeleted+1
-                    else:
-                        #action can be 'M' or 'R'
-                        assert(action == 'M' or action=='R')
-                        fileschanged = fileschanged +1
+            isdir = change.isDirectory()
+            if( isdir == False):
+                action = change.change_type()                
+                if(action == 'A'):
+                    filesadded = filesadded+1
+                elif(action == 'D'):
+                    filesdeleted = filesdeleted+1
+                else:
+                    #action can be 'M' or 'R'
+                    assert(action == 'M' or action=='R')
+                    fileschanged = fileschanged +1
                     
         return(filesadded, fileschanged, filesdeleted)
                     
@@ -452,12 +453,14 @@ class SVNRevLog(object):
             try:
                 msg = makeunicode(self.revlog.message)
             except:
+                logging.exception("error in revision message")
                 msg = u''
             return(msg)
         elif(name == 'date'):
             try:
-                dt = convert2datetime(self.revlog.date)
+                dt = seconds2datetime(self.revlog.date)
             except:
+                logging.exception("error in revision date")
                 dt = None
             return(dt)
         elif(name == 'revno'):
